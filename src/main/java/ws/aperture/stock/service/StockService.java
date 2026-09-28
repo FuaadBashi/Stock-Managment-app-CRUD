@@ -1,102 +1,98 @@
 package ws.aperture.stock.service;
 
-import jakarta.transaction.Transactional;
-import java.time.LocalDate;
 import java.util.List;
-import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import ws.aperture.stock.dto.StockItemDTO;
+import ws.aperture.stock.dto.StockItemRequestDTO;
 import ws.aperture.stock.dto.StockRecordDTO;
 import ws.aperture.stock.dto.StockRecordRequestDTO;
-import ws.aperture.stock.enums.ConditionStatus;
 import ws.aperture.stock.enums.Storage;
+import ws.aperture.stock.exceptions.ConflictException;
 import ws.aperture.stock.exceptions.NoStockItemWithIdException;
-import ws.aperture.stock.exceptions.NoSupplierWithIdException;
-import ws.aperture.stock.exceptions.NonPositiveIngredientQuantityException;
 import ws.aperture.stock.model.StockItem;
 import ws.aperture.stock.model.StockRecord;
-import ws.aperture.stock.model.Supplier;
 import ws.aperture.stock.repository.StockItemRepository;
 import ws.aperture.stock.repository.StockRecordRepository;
 
 @Service
+@Transactional(readOnly = true)
 public class StockService {
+  private final StockItemRepository items;
+  private final StockRecordRepository records;
+  private final SupplierService suppliers;
 
-    private final StockItemRepository stockItemRepository;
-    private final StockRecordRepository stockRecordRepository;
-    private final SupplierService supplierService;
+  public StockService(
+      StockItemRepository items, StockRecordRepository records, SupplierService suppliers) {
+    this.items = items;
+    this.records = records;
+    this.suppliers = suppliers;
+  }
 
-    @Autowired
-    StockService(
-            StockItemRepository stockItemRepository,
-            StockRecordRepository stockRecordRepository,
-            SupplierService supplierService) {
-        this.stockItemRepository = stockItemRepository;
-        this.stockRecordRepository = stockRecordRepository;
-        this.supplierService = supplierService;
-    }
+  private StockItem require(Long id) {
+    return items.findById(id).orElseThrow(() -> new NoStockItemWithIdException(id));
+  }
 
-    @Transactional
-    public List<StockItemDTO> all() {
-        return stockItemRepository.findAll().stream()
-                .map(stockItem -> StockItemDTO.generateDTO(stockItem))
-                .collect(Collectors.toList());
-    }
+  public List<StockItemDTO> all() {
+    return items.findAll(Sort.by("id")).stream().map(StockItemDTO::generateDTO).toList();
+  }
 
-    @Transactional
-    public boolean existsById(Long id) {
-        return stockItemRepository.existsById(id);
-    }
+  public StockItemDTO getById(Long id) {
+    return StockItemDTO.generateDTO(require(id));
+  }
 
-    @Transactional
-    public StockItemDTO addStockItem(StockItemDTO stockItemRequest)
-            throws NoSupplierWithIdException {
+  @Transactional
+  public StockItemDTO addStockItem(StockItemRequestDTO request) {
+    return save(new StockItem(), request);
+  }
 
-        Long supplierId = stockItemRequest.supplierId();
+  @Transactional
+  public StockItemDTO update(Long id, StockItemRequestDTO request) {
+    return save(require(id), request);
+  }
 
-        if (!supplierService.existsById(supplierId)) {
-            throw new NoSupplierWithIdException(supplierId);
-        }
+  private StockItemDTO save(StockItem item, StockItemRequestDTO request) {
+    var supplier = suppliers.require(request.supplierId());
+    if (item.getId() != null && !item.getSupplier().getId().equals(supplier.getId()))
+      throw new ConflictException(
+          "Create a new stock item when changing supplier to preserve provenance");
+    item.setSupplier(supplier);
+    item.setName(request.name().strip());
+    item.setDescription(request.desc());
+    item.setRetailPrice(request.retailPrice());
+    return StockItemDTO.generateDTO(items.saveAndFlush(item));
+  }
 
-        Supplier supplier = supplierService.getReferenceById(supplierId);
+  @Transactional
+  public StockRecordDTO addStock(Long id, StockRecordRequestDTO request) {
+    var item = require(id);
+    if (request.stockItemId() != null && !request.stockItemId().equals(id))
+      throw new IllegalArgumentException("Path and body stock item IDs differ");
+    if (request.expiryDate().isBefore(request.incomingDate()))
+      throw new IllegalArgumentException("Expiry date must not precede receipt date");
+    var record = new StockRecord();
+    record.setStockItem(item);
+    record.setIncomingDate(request.incomingDate());
+    record.setExpiryDate(request.expiryDate());
+    record.setQuantity(request.quantity());
+    record.setStorage(request.storage() == null ? Storage.ROOM_TEMP : request.storage());
+    return StockRecordDTO.generateDTO(records.saveAndFlush(record));
+  }
 
-        StockItem stockItem = new StockItem();
+  public List<StockRecordDTO> records(Long id) {
+    require(id);
+    return records.findByStockItemIdOrderByIncomingDateDescIdDesc(id).stream()
+        .map(StockRecordDTO::generateDTO)
+        .toList();
+  }
 
-        stockItem.setName(stockItemRequest.name());
-        stockItem.setDescription(stockItemRequest.desc());
-        stockItem.setSupplier(supplier);
-        stockItem.setRetailPrice(stockItemRequest.retailPrice());
-
-        // The item was built but never saved, so it came back with a null id and never appeared
-        // in GET /stock.
-        return StockItemDTO.generateDTO(stockItemRepository.save(stockItem));
-    }
-
-    /** Records a delivery of an existing stock item. */
-    @Transactional
-    public StockRecordDTO addStock(Long stockItemId, StockRecordRequestDTO request)
-            throws NoStockItemWithIdException, NonPositiveIngredientQuantityException {
-
-        if (!existsById(stockItemId)) {
-            throw new NoStockItemWithIdException(stockItemId);
-        }
-        if (request.quantity() <= 0) {
-            throw new IllegalArgumentException("quantity must be positive");
-        }
-        if (request.expiryDate() == null) {
-            throw new IllegalArgumentException("expiryDate is required");
-        }
-
-        StockRecord stockRecord = new StockRecord();
-        stockRecord.setStockItem(stockItemRepository.getReferenceById(stockItemId));
-        stockRecord.setIncomingDate(
-                request.incomingDate() != null ? request.incomingDate() : LocalDate.now());
-        stockRecord.setExpiryDate(request.expiryDate());
-        stockRecord.setQuantity(request.quantity());
-        stockRecord.setConditionStatus(ConditionStatus.SEALED);
-        stockRecord.setStorage(request.storage() != null ? request.storage() : Storage.ROOM_TEMP);
-
-        return StockRecordDTO.generateDTO(stockRecordRepository.save(stockRecord));
-    }
+  @Transactional
+  public void delete(Long id) {
+    var item = require(id);
+    if (records.existsByStockItemId(id))
+      throw new ConflictException("Stock items with receipt history cannot be deleted");
+    items.delete(item);
+    items.flush();
+  }
 }

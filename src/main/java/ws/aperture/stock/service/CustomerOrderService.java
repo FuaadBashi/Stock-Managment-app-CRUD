@@ -1,303 +1,115 @@
 package ws.aperture.stock.service;
 
-import jakarta.transaction.Transactional;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import ws.aperture.stock.dto.CustomerOrderDTO;
 import ws.aperture.stock.dto.CustomerOrderItemDTO;
 import ws.aperture.stock.dto.CustomerOrderRequestDTO;
 import ws.aperture.stock.enums.CustomerOrderStatus;
+import ws.aperture.stock.enums.ProductAndStockStatus;
+import ws.aperture.stock.exceptions.ConflictException;
 import ws.aperture.stock.exceptions.DuplicateProductInOrderException;
 import ws.aperture.stock.exceptions.EmptyCustomerOrderItemsException;
 import ws.aperture.stock.exceptions.NoCustomerOrderIdException;
-import ws.aperture.stock.exceptions.NoProductWithIdException;
-import ws.aperture.stock.exceptions.NoUserWithIdException;
-import ws.aperture.stock.exceptions.NonPositiveProductQuantityException;
 import ws.aperture.stock.model.CustomerOrder;
 import ws.aperture.stock.model.CustomerOrderItem;
-import ws.aperture.stock.model.Product;
-import ws.aperture.stock.repository.CustomerOrderItemRepository;
 import ws.aperture.stock.repository.CustomerOrderRepository;
 
 @Service
+@Transactional(readOnly = true)
 public class CustomerOrderService {
+  private final CustomerOrderRepository orders;
+  private final ProductService products;
+  private final UserService users;
 
-    private final CustomerOrderRepository customerOrderRepository;
-    private final CustomerOrderItemRepository customerOrderItemRepository;
+  public CustomerOrderService(
+      CustomerOrderRepository orders, ProductService products, UserService users) {
+    this.orders = orders;
+    this.products = products;
+    this.users = users;
+  }
 
-    /*  REFACTOR TODO: refactor any repository accceses into service methods which we can call from this service
-     *
-     *
-     *      Motivation:
-     *      -   services should manage the repositories that pertain to them only
-     *      -   if services need information from repositories which are managed by other services,
-     *          they can communicate with one another to share information and data rather than
-     *          directly sharing respository access
-     *      -   The StockOrderService service should be responsible for
-     *          both the StockOrderRepository and StockOrderItemRepository only
-     *
-     *      Implementation:
-     *      e.g. instead of checking if userRepo existsByID in createStockOrder:
-     *           -  create a (package-private ideally) boolean helper method in our userService
-     *           -  this helper should throw the NoUserWIthIdException
-     *
-     *      should exceptions then be grouped into service-related files...?
-     *
-     *       - Constructor pattern will be the same for initialising services
-     *       - write service based helper methods as required
-     *          - mark @Transactional for any database accesses
-     *       - call service helper methods in this class, instead of foreign jpa repositories
-     *         ( in this case, userRepository and productRepository )
-     *
-     *      Public Services we need: (should be called by the StockOrder controller with GET, PUT, etc.)
-     *
-     *      Don't DELETE Stock Orders. If the user who created it wants to delete it, they can set its
-     *      StockOrderStatus (defined in enum folder) to StockOrderSTatus.DELETED
-     *      to `logically` delete a record, but keep the record in the database for pretend auditing ;)
-     *      We have create stock order, we also want:
-     *       - delete (logically only, http PUT mapping not DELETE mapping in StockOrderController )
-     *          - set record status to DELETED only, return whatever data feels sensible
-     *
-     *       - modify a StockOrder:
-     *            - give your userId, a StockOrderId, and a list of StockOrderItems
-     *            - check:
-     *                  - this user exists AND stock order exists
-     *                    AND you created this stock order AND StockOrderStatus is NEW
-     *            - if all good, modify the stock order with given id, store, and return its DTO
-     */
+  public CustomerOrderDTO getById(Long id) {
+    return CustomerOrderDTO.generateDTO(
+        orders.findById(id).orElseThrow(() -> new NoCustomerOrderIdException(id)));
+  }
 
-    private final ProductService productService;
-    private final UserService userService;
+  public List<CustomerOrderDTO> all() {
+    return orders.findAll(Sort.by("id")).stream().map(CustomerOrderDTO::generateDTO).toList();
+  }
 
-    // private final ProductRepository        productRepository;
-    // private final UserRepository           userRepository;
+  @Transactional
+  public CustomerOrderDTO createCustomerOrder(CustomerOrderRequestDTO request) {
+    var order = new CustomerOrder();
+    order.setCreator(users.require(request.userId()));
+    order.setOrderTimeStamp(LocalDateTime.now());
+    var items = buildItems(order, request.itemRequests());
+    order.getCustomerOrderItems().addAll(items);
+    return CustomerOrderDTO.generateDTO(orders.saveAndFlush(order));
+  }
 
-    @Autowired
-    CustomerOrderService(
-            CustomerOrderRepository customerOrderRepository,
-            CustomerOrderItemRepository customerOrderItemRepository,
-            ProductService productService,
-            UserService userService) {
-
-        this.customerOrderRepository = customerOrderRepository;
-        this.customerOrderItemRepository = customerOrderItemRepository;
-        this.productService = productService;
-        this.userService = userService;
+  private List<CustomerOrderItem> buildItems(
+      CustomerOrder order, List<CustomerOrderItemDTO> requests) {
+    if (requests == null || requests.isEmpty()) throw new EmptyCustomerOrderItemsException();
+    Set<Long> seen = new HashSet<>();
+    List<CustomerOrderItem> items = new ArrayList<>();
+    for (var request :
+        requests.stream().sorted(Comparator.comparing(CustomerOrderItemDTO::productId)).toList()) {
+      if (!seen.add(request.productId()))
+        throw new DuplicateProductInOrderException(request.productId());
+      var product = products.requireLocked(request.productId());
+      if (product.getStatus() == ProductAndStockStatus.DISCONTINUED)
+        throw new ConflictException("Discontinued products cannot be ordered");
+      var item = new CustomerOrderItem();
+      item.setProduct(product);
+      item.setCustomerOrder(order);
+      item.setQuantity(request.quantity());
+      item.setUnitPrice(product.getRetailPrice());
+      items.add(item);
     }
+    return items;
+  }
 
-    @Transactional
-    public CustomerOrderDTO createCustomerOrder(CustomerOrderRequestDTO customerOrderRequest)
-            throws NoUserWithIdException,
-                    EmptyCustomerOrderItemsException,
-                    DuplicateProductInOrderException,
-                    NonPositiveProductQuantityException,
-                    NoProductWithIdException {
-        List<CustomerOrderItemDTO> itemRequests = customerOrderRequest.itemRequests();
+  @Transactional
+  public CustomerOrderDTO update(Long id, CustomerOrderRequestDTO request) {
+    var order = locked(id);
+    if (order.getStatus() != CustomerOrderStatus.NEW)
+      throw new ConflictException("Only new orders can be edited");
+    if (!order.getCreator().getId().equals(request.userId()))
+      throw new ConflictException("Order creator cannot be changed");
+    var items = buildItems(order, request.itemRequests());
+    order.getCustomerOrderItems().clear();
+    orders.flush();
+    order.getCustomerOrderItems().addAll(items);
+    return CustomerOrderDTO.generateDTO(orders.saveAndFlush(order));
+  }
 
-        // check user exists in DB
-        Long creatorId = customerOrderRequest.userId();
-        if (!userService.userExistWithId(creatorId)) {
-            throw new NoUserWithIdException(creatorId);
-        }
+  private CustomerOrder locked(Long id) {
+    return orders.findLockedById(id).orElseThrow(() -> new NoCustomerOrderIdException(id));
+  }
 
-        // Check order requests not empty
-        if (itemRequests.size() == 0) {
-            throw new EmptyCustomerOrderItemsException();
-        }
-
-        // Check no duplicate products in order
-        Set<Long> productIds = new HashSet<Long>();
-        for (CustomerOrderItemDTO soir : itemRequests) {
-            Long currProdId = soir.productId();
-            int quantity = soir.quantity();
-
-            if (productIds.contains(currProdId)) {
-                throw new DuplicateProductInOrderException(currProdId);
-            } else {
-                productIds.add(currProdId);
-            }
-
-            // check each product in the order exists in the DB
-            if (!productService.existsById(currProdId)) {
-                throw new NoProductWithIdException(currProdId);
-            }
-
-            if (quantity <= 0) {
-                throw new NonPositiveProductQuantityException(currProdId, quantity);
-            }
-        }
-
-        // PASSED ALL CHECKS
-
-        // Create and Save new stock order to DB
-        CustomerOrder customerOrder = new CustomerOrder();
-        customerOrder.setCreator(userService.getReferenceById(creatorId));
-        customerOrder.setOrderTimeStamp(LocalDateTime.now());
-        customerOrder = customerOrderRepository.saveAndFlush(customerOrder);
-
-        Set<CustomerOrderItem> customerOrderItems = new HashSet<CustomerOrderItem>();
-        for (CustomerOrderItemDTO itemRequest : itemRequests) {
-            Product product = productService.getReferenceById(itemRequest.productId());
-            int quantity = itemRequest.quantity();
-
-            CustomerOrderItem item = new CustomerOrderItem();
-            item.setCustomerOrder(customerOrder);
-            item.setProduct(product);
-            item.setQuantity(quantity);
-
-            customerOrderItems.add(item);
-
-            customerOrderItemRepository.saveAndFlush(item);
-        }
-
-        // customerOrder = customerOrderRepository.findById (customerOrder.getId() ).get();
-        customerOrder.setCustomerOrderItems(customerOrderItems);
-
-        return CustomerOrderDTO.generateDTO(customerOrder);
-    }
-
-    // Transactional so the lazily loaded order items are still readable when the DTO is built.
-    @Transactional
-    public CustomerOrderDTO getById(Long id) {
-
-        Optional<CustomerOrder> found = customerOrderRepository.findById(id);
-        if (found.isPresent()) {
-            CustomerOrder order = found.get();
-            CustomerOrderDTO foundDTO = CustomerOrderDTO.generateDTO(order);
-            return foundDTO;
-        } else {
-            throw new NoCustomerOrderIdException(id);
-        }
-    }
-
-    // public CustomerOrderDTO customerOrderStatusChange(CustomerOrderStatus status, Long id){
-    //     Optional<CustomerOrder> found = customerOrderRepository.findById(id);
-    //     if (found.isPresent()) {
-    //         CustomerOrder order = found.get();
-    //         order.setStatus(status);
-    //         CustomerOrderDTO foundDTO = CustomerOrderDTO.generateDTO(order);
-    //         return foundDTO;
-    //     } else {
-    //         throw new NoCustomerOrderIdException(id);
-    //     }
-    // }
-
-    // @Transactional
-    // public CustomerOrderDTO completeCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-    //     return customerOrderStatusChange(CustomerOrderStatus.COMPLETED, id);
-    // }
-
-    // @Transactional
-    // public CustomerOrderDTO cancleCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-    //     return customerOrderStatusChange(CustomerOrderStatus.CANCELLED, id);
-    // }
-
-    // @Transactional
-    // public CustomerOrderDTO startCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-    //     return customerOrderStatusChange(CustomerOrderStatus.STARTED, id);
-    // }
-
-    // @Transactional
-    // public CustomerOrderDTO deleteCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-    //     return customerOrderStatusChange(CustomerOrderStatus.DELETED, id);
-    // }
-
-    @Transactional
-    public CustomerOrderDTO completeCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-        Optional<CustomerOrder> found = customerOrderRepository.findById(id);
-        if (found.isPresent()) {
-            CustomerOrder order = found.get();
-            order.setStatus(CustomerOrderStatus.COMPLETED);
-            CustomerOrderDTO foundDTO = CustomerOrderDTO.generateDTO(order);
-            return foundDTO;
-        } else {
-            throw new NoCustomerOrderIdException(id);
-        }
-    }
-
-    @Transactional
-    public CustomerOrderDTO cancleCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-        Optional<CustomerOrder> found = customerOrderRepository.findById(id);
-        if (found.isPresent()) {
-            CustomerOrder order = found.get();
-
-            order.setStatus(CustomerOrderStatus.CANCELLED);
-            CustomerOrderDTO foundDTO = CustomerOrderDTO.generateDTO(order);
-            return foundDTO;
-        } else {
-            throw new NoCustomerOrderIdException(id);
-        }
-    }
-
-    @Transactional
-    public CustomerOrderDTO startCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-        Optional<CustomerOrder> found = customerOrderRepository.findById(id);
-        if (found.isPresent()) {
-            CustomerOrder order = found.get();
-            order.setStatus(CustomerOrderStatus.STARTED);
-            CustomerOrderDTO foundDTO = CustomerOrderDTO.generateDTO(order);
-            return foundDTO;
-        } else {
-            throw new NoCustomerOrderIdException(id);
-        }
-    }
-
-    @Transactional
-    public CustomerOrderDTO deleteCustomerOrder(Long id) throws NoCustomerOrderIdException {
-
-        Optional<CustomerOrder> found = customerOrderRepository.findById(id);
-        if (found.isPresent()) {
-            CustomerOrder order = found.get();
-            order.setStatus(CustomerOrderStatus.DELETED);
-            CustomerOrderDTO foundDTO = CustomerOrderDTO.generateDTO(order);
-            return foundDTO;
-        } else {
-            throw new NoCustomerOrderIdException(id);
-        }
-    }
-
-    // @Transactional
-    // public List<StockOrderDTO> all() {
-    //     return customerOrderRepository.findAll()
-    //            .stream()
-    //            .map( customerOrder -> StockOrderDTO.generateDTO(customerOrder) )
-    //            .collect( Collectors.toList()) ;
-    // }
-
-    // @Transactional
-    // public StockOrderDTO getById(Long id) throws NoUserwithIdException {
-
-    //     Optional<StockOrder> found = customerOrderRepository.findById(id);
-    //     if (found.isPresent()) {
-    //         StockOrderDTO foundDTO = StockOrderDTO.generateDTO(found.get());
-    //         return foundDTO;
-    //     } else {
-    //         throw new NoUserwithIdException(id);
-    //     }
-    // }
-
-    // @Transactional
-    // public StockOrderDTO deleteById(Long id) throws NoUserwithIdException {
-    //     Optional<StockOrder> found = customerOrderRepository.findById(id);
-    //     if (found.isPresent()) {
-    //         StockOrderDTO foundDTO = StockOrderDTO.generateDTO(found.get()) ;
-    //         customerOrderRepository.deleteById(id);
-    //         return foundDTO;
-    //     } else {
-    //         throw new NoUserwithIdException(id);
-    //     }
-    // }
-
+  @Transactional
+  public CustomerOrderDTO transition(Long id, CustomerOrderStatus target) {
+    var order = locked(id);
+    var from = order.getStatus();
+    if (from == target) return CustomerOrderDTO.generateDTO(order);
+    boolean allowed =
+        switch (target) {
+          case STARTED -> from == CustomerOrderStatus.NEW;
+          case COMPLETED -> from == CustomerOrderStatus.STARTED;
+          case CANCELLED -> from == CustomerOrderStatus.NEW || from == CustomerOrderStatus.STARTED;
+          case DELETED -> from == CustomerOrderStatus.NEW || from == CustomerOrderStatus.CANCELLED;
+          case NEW -> false;
+        };
+    if (!allowed) throw new ConflictException("Cannot change order from " + from + " to " + target);
+    order.setStatus(target);
+    return CustomerOrderDTO.generateDTO(orders.saveAndFlush(order));
+  }
 }

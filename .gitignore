@@ -23,10 +23,9 @@
 hs_err_pid*
 replay_pid*
 
-# Added: build output, editor and OS files
-target/
-out/
+/target/
+/data/
+.env
 .idea/
-*.iml
 .vscode/
 .DS_Store

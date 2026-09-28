@@ -1,17 +1,9 @@
 package ws.aperture.stock.dto;
 
-import java.util.Set;
-import java.util.stream.Collectors;
-import ws.aperture.stock.model.CustomerOrderItem;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 
-public record CustomerOrderItemDTO(Long productId, int quantity) {
-    private static CustomerOrderItemDTO generateDTO(CustomerOrderItem soi) {
-        return new CustomerOrderItemDTO(soi.getProduct().getId(), soi.getQuantity());
-    }
-
-    public static Set<CustomerOrderItemDTO> generateDTOs(Set<CustomerOrderItem> sois) {
-        return sois.stream()
-                .map(soi -> CustomerOrderItemDTO.generateDTO(soi))
-                .collect(Collectors.toSet());
-    }
-}
+public record CustomerOrderItemDTO(
+    @NotNull @Positive Long productId, @Min(1) @Max(100000) int quantity) {}

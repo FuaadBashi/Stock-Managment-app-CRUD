@@ -1,18 +1,41 @@
-name: CI
-
+name: Build and test
 on:
   push:
   pull_request:
-
+permissions:
+  contents: read
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        database: [h2, postgres]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: stock_test
+          POSTGRES_USER: stock
+          POSTGRES_PASSWORD: test-only-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U stock -d stock_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '21'
           cache: maven
-      - name: Build, test and check formatting
-        run: mvn -B verify
+      - name: Verify with H2
+        if: matrix.database == 'h2'
+        run: ./mvnw -B verify
+      - name: Verify with PostgreSQL
+        if: matrix.database == 'postgres'
+        run: >-
+          ./mvnw -B verify
+          -Dspring.datasource.url=jdbc:postgresql://localhost:5432/stock_test
+          -Dspring.datasource.username=stock
+          -Dspring.datasource.password=test-only-password

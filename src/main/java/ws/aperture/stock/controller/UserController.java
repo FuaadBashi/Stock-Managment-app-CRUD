@@ -1,92 +1,64 @@
 package ws.aperture.stock.controller;
 
+import jakarta.validation.Valid;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import ws.aperture.stock.dto.SysUserDTO;
 import ws.aperture.stock.dto.UserIdDTO;
-import ws.aperture.stock.exceptions.DuplicateEmailException;
-import ws.aperture.stock.exceptions.NoUserWithIdException;
-import ws.aperture.stock.exceptions.UnfilledRegistrationFieldsException;
-import ws.aperture.stock.model.SysUser;
+import ws.aperture.stock.dto.UserRequestDTO;
 import ws.aperture.stock.service.UserService;
 
 @RestController
 @RequestMapping("/users")
 public class UserController {
+  private final UserService service;
 
-    private final UserService userService;
+  public UserController(UserService service) {
+    this.service = service;
+  }
 
-    UserController(UserService userService) {
-        this.userService = userService;
-    }
+  @GetMapping
+  public List<SysUserDTO> all() {
+    return service.all();
+  }
 
-    private static final String welcomeTemplate = "Welcome %s. You are visitor no: %d\n";
-    private final AtomicLong counter = new AtomicLong();
+  @PostMapping
+  @ResponseStatus(HttpStatus.CREATED)
+  public SysUserDTO create(@Valid @RequestBody UserRequestDTO request) {
+    return service.registerUser(request);
+  }
 
-    @GetMapping("/welcome")
-    public String greeting(@RequestParam(value = "name", defaultValue = "") String name) {
-        return String.format(welcomeTemplate, name, counter.incrementAndGet());
-    }
+  @GetMapping("/{id}")
+  public SysUserDTO get(@PathVariable Long id) {
+    return service.getById(id);
+  }
 
-    @GetMapping("")
-    public List<SysUserDTO> all() {
-        return userService.all();
-    }
+  @PutMapping("/{id}")
+  public SysUserDTO update(@PathVariable Long id, @Valid @RequestBody UserRequestDTO request) {
+    return service.update(id, request);
+  }
 
-    @PostMapping("")
-    public SysUserDTO registerUser(@RequestBody SysUser newUser)
-            throws UnfilledRegistrationFieldsException, DuplicateEmailException {
+  @DeleteMapping("/{id}")
+  public SysUserDTO delete(@PathVariable Long id) {
+    return service.deleteById(id);
+  }
 
-        if (checkUserFields(newUser)) {
-            return userService.registerUser(newUser);
+  @GetMapping("/ids")
+  public List<UserIdDTO> ids() {
+    return service.getIDs();
+  }
 
-        } else {
-            throw new UnfilledRegistrationFieldsException();
-        }
-    }
-
-    @GetMapping("/{userId}")
-    public SysUserDTO getById(@PathVariable(value = "userId", required = true) Long id)
-            throws NoUserWithIdException {
-        return userService.getById(id);
-    }
-
-    @DeleteMapping("/{userId}")
-    public SysUserDTO deleteById(@PathVariable(value = "userId", required = true) Long id)
-            throws NoUserWithIdException {
-        return userService.deleteById(id);
-    }
-
-    @GetMapping("/ids")
-    public List<UserIdDTO> getIDs() {
-        return userService.getIDs();
-    }
-
-    @GetMapping("/info/{userName}")
-    public SysUserDTO getInfoByUsername(
-            @PathVariable(value = "userName", required = true) String userName) {
-        return userService.getInfoByUsername(userName);
-    }
-
-    private boolean checkUserFields(SysUser inputUser) {
-
-        String firstName = inputUser.getFirstName();
-        String lastName = inputUser.getLastName();
-        String email = inputUser.getEmail();
-
-        return (firstName != null
-                && lastName != null
-                && email != null
-                && firstName.length() > 0
-                && lastName.length() > 0
-                && email.length() > 6);
-    }
+  @GetMapping("/info/{name}")
+  public SysUserDTO find(@PathVariable String name) {
+    return service.getInfoByUsername(name);
+  }
 }

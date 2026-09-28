@@ -1,6 +1,5 @@
 package ws.aperture.stock.model;
 
-import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -8,59 +7,38 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
-import jakarta.persistence.Transient;
 import java.time.LocalDate;
-import java.util.Set;
 import lombok.Getter;
 import lombok.Setter;
 import ws.aperture.stock.enums.Role;
 
 @Entity
+@Table(name = "sysuser")
 @Getter
 @Setter
-@Table(name = "sysuser")
 public class SysUser {
+  @Id
+  @GeneratedValue(strategy = GenerationType.IDENTITY)
+  @Column(name = "user_id")
+  private Long id;
 
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @Column(name = "user_id")
-    private Long id;
+  @Column(nullable = false, length = 100)
+  private String firstName;
 
-    @Column(nullable = false)
-    private String firstName;
+  @Column(nullable = false, length = 100)
+  private String lastName;
 
-    @Column(nullable = false)
-    private String lastName;
+  @Column(nullable = false, unique = true, length = 220)
+  private String userName;
 
-    @Column(unique = true, nullable = false)
-    private String userName;
+  @Column(nullable = false, unique = true, length = 254)
+  private String email;
 
-    @Enumerated(EnumType.STRING)
-    private Role role;
+  @Enumerated(EnumType.STRING)
+  @Column(nullable = false)
+  private Role role = Role.EMPLOYEE;
 
-    @Column(unique = true, nullable = false)
-    private String email;
-
-    @Column(unique = false, nullable = true)
-    private String occupation;
-
-    @Column(unique = false, nullable = true)
-    private String salutation;
-
-    @Column(unique = false, nullable = true, columnDefinition = "DATE")
-    private LocalDate startDate;
-
-    @Column(unique = false, nullable = true, columnDefinition = "DATE")
-    private LocalDate registrationDate;
-
-    @Column
-    @Transient
-    public String fullName() {
-        return firstName + " " + lastName;
-    }
-
-    @OneToMany(mappedBy = "creator", cascade = CascadeType.REMOVE, orphanRemoval = true)
-    public Set<CustomerOrder> customerOrders;
+  @Column(nullable = false)
+  private LocalDate registrationDate;
 }

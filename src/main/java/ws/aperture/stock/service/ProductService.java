@@ -1,123 +1,105 @@
 package ws.aperture.stock.service;
 
-import jakarta.transaction.Transactional;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Autowired;
+import java.util.Set;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import ws.aperture.stock.dto.ProductDTO;
 import ws.aperture.stock.dto.ProductRequestDTO;
 import ws.aperture.stock.dto.RecipeDTO;
 import ws.aperture.stock.dto.RecipeItemDTO;
+import ws.aperture.stock.enums.ProductAndStockStatus;
 import ws.aperture.stock.exceptions.EmptyRecipeBodyException;
-import ws.aperture.stock.exceptions.NoIngredientWithIdException;
 import ws.aperture.stock.exceptions.NoProductWithIdException;
-import ws.aperture.stock.exceptions.NonPositiveIngredientQuantityException;
-import ws.aperture.stock.model.Ingredient;
 import ws.aperture.stock.model.Product;
 import ws.aperture.stock.model.RecipeMapping;
 import ws.aperture.stock.repository.ProductRepository;
 import ws.aperture.stock.repository.RecipeMappingRepository;
 
 @Service
+@Transactional(readOnly = true)
 public class ProductService {
+  private final ProductRepository products;
+  private final RecipeMappingRepository recipes;
+  private final IngredientService ingredients;
 
-    private final ProductRepository productRepository;
-    private final RecipeMappingRepository recipeMappingRepository;
+  public ProductService(
+      ProductRepository products, RecipeMappingRepository recipes, IngredientService ingredients) {
+    this.products = products;
+    this.recipes = recipes;
+    this.ingredients = ingredients;
+  }
 
-    private final IngredientService ingredientService;
+  public Product require(Long id) {
+    return products.findById(id).orElseThrow(() -> new NoProductWithIdException(id));
+  }
 
-    @Autowired
-    ProductService(
-            ProductRepository productRepository,
-            RecipeMappingRepository recipeMappingRepository,
-            IngredientService ingredientService) {
-        this.productRepository = productRepository;
-        this.recipeMappingRepository = recipeMappingRepository;
-        this.ingredientService = ingredientService;
+  public Product requireLocked(Long id) {
+    return products.findLockedById(id).orElseThrow(() -> new NoProductWithIdException(id));
+  }
+
+  public ProductDTO getById(Long id) {
+    return ProductDTO.generateDTO(require(id));
+  }
+
+  public List<ProductDTO> all() {
+    return products.findAll(Sort.by("id")).stream().map(ProductDTO::generateDTO).toList();
+  }
+
+  @Transactional
+  public ProductDTO createProduct(ProductRequestDTO request) {
+    return save(new Product(), request);
+  }
+
+  @Transactional
+  public ProductDTO update(Long id, ProductRequestDTO request) {
+    return save(requireLocked(id), request);
+  }
+
+  private ProductDTO save(Product product, ProductRequestDTO request) {
+    product.setName(request.name().strip());
+    product.setDescription(request.desc());
+    product.setRetailPrice(request.retailPrice());
+    return ProductDTO.generateDTO(products.saveAndFlush(product));
+  }
+
+  @Transactional
+  public ProductDTO discontinue(Long id) {
+    var product = requireLocked(id);
+    product.setStatus(ProductAndStockStatus.DISCONTINUED);
+    return ProductDTO.generateDTO(product);
+  }
+
+  public RecipeDTO recipe(Long id) {
+    require(id);
+    return new RecipeDTO(
+        id,
+        recipes.findByProductIdOrderByIngredientId(id).stream()
+            .map(r -> new RecipeItemDTO(r.getIngredient().getId(), r.getQuantity()))
+            .toList());
+  }
+
+  @Transactional
+  public RecipeDTO updateRecipe(Long id, List<RecipeItemDTO> items) {
+    var product = requireLocked(id);
+    if (items == null || items.isEmpty()) throw new EmptyRecipeBodyException();
+    Set<Long> seen = new HashSet<>();
+    List<RecipeMapping> mappings = new ArrayList<>();
+    for (var item : items) {
+      if (!seen.add(item.ingredientId()))
+        throw new IllegalArgumentException("Duplicate recipe ingredient");
+      var mapping = new RecipeMapping();
+      mapping.setProduct(product);
+      mapping.setIngredient(ingredients.require(item.ingredientId()));
+      mapping.setQuantity(item.quantity());
+      mappings.add(mapping);
     }
-
-    @Transactional
-    public List<ProductDTO> all() {
-        return productRepository.findAll().stream()
-                .map(product -> ProductDTO.generateDTO(product))
-                .collect(Collectors.toList());
-    }
-
-    public RecipeDTO updateRecipe(Long productId, List<RecipeItemDTO> recipeItems)
-            throws NoProductWithIdException,
-                    NoIngredientWithIdException,
-                    NonPositiveIngredientQuantityException {
-        if (!existsById(productId)) {
-            throw new NoProductWithIdException(productId);
-        }
-
-        if (recipeItems.isEmpty()) {
-            throw new EmptyRecipeBodyException();
-        }
-
-        for (RecipeItemDTO recipeItem : recipeItems) {
-            Long ingredientId = recipeItem.ingredientId();
-            if (!ingredientService.existsById(ingredientId)) {
-                throw new NoIngredientWithIdException(ingredientId);
-            }
-
-            double quantity = recipeItem.quantity();
-            if (quantity <= 0.0) {
-                throw new NonPositiveIngredientQuantityException(ingredientId, quantity);
-            }
-        }
-
-        // PASSED ALL CHECKS
-
-        // Create and Save new Recipe Mapping to DB
-
-        Product product = getReferenceById(productId);
-
-        List<RecipeMapping> recipeMappings = new ArrayList<RecipeMapping>();
-
-        for (RecipeItemDTO recipeItem : recipeItems) {
-            RecipeMapping recipeMapping = new RecipeMapping();
-
-            double quantity = recipeItem.quantity();
-            Ingredient ingredient = ingredientService.getReferenceById(recipeItem.ingredientId());
-
-            recipeMapping.setIngredient(ingredient);
-            recipeMapping.setProduct(product);
-            recipeMapping.setQuantity(quantity);
-
-            recipeMappings.add(recipeMapping);
-        }
-
-        recipeMappingRepository.saveAllAndFlush(recipeMappings);
-
-        return new RecipeDTO(productId, recipeItems);
-    }
-
-    @Transactional
-    public ProductDTO createProduct(ProductRequestDTO productRequest) {
-
-        Product product = new Product();
-
-        product.setName(productRequest.name());
-        product.setDescription(productRequest.desc());
-        product.setRetailPrice(productRequest.retailPrice());
-
-        productRepository.saveAndFlush(product);
-
-        return ProductDTO.generateDTO(product);
-    }
-
-    public boolean existsById(Long id) {
-        return productRepository.existsById(id);
-    }
-
-    public Product getReferenceById(Long id) {
-        return productRepository.getReferenceById(id);
-    }
-
-    public Product getReferenceByName(String name) {
-        return productRepository.findByName(name);
-    }
+    recipes.deleteByProductId(id);
+    recipes.flush();
+    recipes.saveAllAndFlush(mappings);
+    return recipe(id);
+  }
 }
