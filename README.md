@@ -99,6 +99,7 @@ Tests create records; use a disposable test database.
 - [Services](src/main/java/ws/aperture/stock/service): business rules and transaction boundaries.
 - [Models](src/main/java/ws/aperture/stock/model) and [migration](src/main/resources/db/migration/V1__initial_schema.sql): relational integrity and exact numeric types.
 - [Integration tests](src/test/java/ws/aperture/stock/ApiIntegrationTest.java): executable workflow examples.
+- [Legacy route tests](src/test/java/ws/aperture/stock/LegacyRoutesAndLookupsTest.java): every legacy alias and a not-found response for each resource.
 
 ## Scope
 
